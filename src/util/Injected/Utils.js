@@ -3,34 +3,6 @@
 exports.LoadUtils = () => {
     window.WWebJS = {};
 
-    // Compatibility shim: newer WhatsApp Web builds (2.3000.1043xxx, July 2026)
-    // expose the serialized wid/msg-key as `$1` instead of `_serialized`.
-    // See https://github.com/wwebjs/whatsapp-web.js/issues/201831
-    window.WWebJS.widSerialized = (wid) => {
-        if (!wid || typeof wid === 'string') return wid;
-        return wid._serialized
-            ?? wid.$1
-            ?? (typeof wid.toString === 'function' ? wid.toString() : undefined);
-    };
-
-    // Recursively mirror `$1` back onto `_serialized` in serialized models so
-    // node-side code (and user code) keeps reading `id._serialized` as before.
-    window.WWebJS.normalizeSerialized = (obj, depth = 0) => {
-        if (!obj || typeof obj !== 'object' || depth > 8) return obj;
-        if (Array.isArray(obj)) {
-            for (const item of obj) window.WWebJS.normalizeSerialized(item, depth + 1);
-            return obj;
-        }
-        if (obj.$1 !== undefined && obj._serialized === undefined) {
-            obj._serialized = obj.$1;
-        }
-        for (const key of Object.keys(obj)) {
-            const value = obj[key];
-            if (value && typeof value === 'object') window.WWebJS.normalizeSerialized(value, depth + 1);
-        }
-        return obj;
-    };
-
     /**
      * Helper function that compares between two WWeb versions. Its purpose is to help the developer to choose the correct code implementation depending on the comparison value and the WWeb version.
      * @param {string} lOperand The left operand for the WWeb version string to compare with
@@ -608,65 +580,9 @@ exports.LoadUtils = () => {
 
         if (options.waitUntilMsgSent) await sendMsgResultPromise;
 
-        let sentMsg = window
+        return window
             .require('WAWebCollections')
-            .Msg.get(newMsgKey._serialized);
-
-        // The sent message can be indexed under a key built with the
-        // chat's sibling wid (lid <-> phone number); the random id part
-        // of the key does not depend on the wid, so look it up directly
-        // in the chat's own collection
-        if (!sentMsg) {
-            sentMsg = chat.msgs
-                .getModelsArray()
-                .find((m) => m.id.id === newMsgKey.id);
-        }
-
-        let altWid;
-        if (
-            !sentMsg &&
-            typeof chat.id?.isUser === 'function' &&
-            chat.id.isUser()
-        ) {
-            altWid = window
-                .require('WAWebApiContact')
-                .getAlternateUserWid(chat.id);
-            if (altWid) {
-                const altMsgKey = new (window.require('WAWebMsgKey'))({
-                    from: from,
-                    to: altWid,
-                    id: newId,
-                    participant: participant,
-                    selfDir: 'out',
-                });
-                sentMsg =
-                    window
-                        .require('WAWebCollections')
-                        .Msg.get(altMsgKey._serialized) ||
-                    window
-                        .require('WAWebCollections')
-                        .Chat.get(altWid)
-                        ?.msgs.getModelsArray()
-                        .find((m) => m.id.id === newMsgKey.id);
-            }
-        }
-
-        // Keep a debug trail so clients can inspect why the sent message
-        // could not be found in the collections
-        if (!sentMsg) {
-            window.WWebJS.lastSendMessageDebug = {
-                newMsgKey: newMsgKey._serialized,
-                chatId: chat.id._serialized,
-                altWid: altWid ? altWid._serialized : null,
-                lastChatMsgKeys: chat.msgs
-                    .getModelsArray()
-                    .slice(-3)
-                    .map((m) => m.id._serialized),
-                time: Date.now(),
-            };
-        }
-
-        return sentMsg;
+            .Msg.get(newMsgKey._serialized || newMsgKey.$1);
     };
 
     window.WWebJS.editMessage = async (msg, content, options = {}) => {
@@ -709,7 +625,9 @@ exports.LoadUtils = () => {
         await window
             .require('WAWebSendMessageEditAction')
             .sendMessageEdit(msg, content, internalOptions);
-        return window.require('WAWebCollections').Msg.get(msg.id._serialized || msg.id.$1);
+        return window
+            .require('WAWebCollections')
+            .Msg.get(msg.id._serialized || msg.id.$1);
     };
 
     window.WWebJS.toStickerData = async (mediaInfo) => {
@@ -926,7 +844,7 @@ exports.LoadUtils = () => {
 
         delete msg.pendingAckUpdate;
 
-        return window.WWebJS.normalizeSerialized(msg);
+        return msg;
     };
 
     window.WWebJS.getChat = async (chatId, { getAsModel = true } = {}) => {
@@ -1071,36 +989,29 @@ exports.LoadUtils = () => {
 
         model.lastMessage = null;
         if (model.msgs && model.msgs.length) {
-            try {
-                const _lastReceivedKeyId = chat.lastReceivedKey
-                    ? (chat.lastReceivedKey._serialized || chat.lastReceivedKey.$1)
-                    : null;
-                const lastMessage = _lastReceivedKeyId
-                    ? window
+            const _lastReceivedKeyId = chat.lastReceivedKey
+                ? chat.lastReceivedKey._serialized || chat.lastReceivedKey.$1
+                : null;
+            const lastMessage = _lastReceivedKeyId
+                ? window
+                      .require('WAWebCollections')
+                      .Msg.get(_lastReceivedKeyId) ||
+                  (
+                      await window
                           .require('WAWebCollections')
-                          .Msg.get(_lastReceivedKeyId) ||
-                      (
-                          await window
-                              .require('WAWebCollections')
-                              .Msg.getMessagesById([
-                                  _lastReceivedKeyId,
-                              ])
-                      )?.messages?.[0]
-                    : null;
-                lastMessage &&
-                    (model.lastMessage =
-                        window.WWebJS.getMessageModel(lastMessage));
-            } catch (e) {
-                // lastMessage resolution is best-effort; a key-format change
-                // in WhatsApp Web must not break the whole chat model
-            }
+                          .Msg.getMessagesById([_lastReceivedKeyId])
+                  )?.messages?.[0]
+                : null;
+            lastMessage &&
+                (model.lastMessage =
+                    window.WWebJS.getMessageModel(lastMessage));
         }
 
         delete model.msgs;
         delete model.msgUnsyncedButtonReplyMsgs;
         delete model.unsyncedButtonReplies;
 
-        return window.WWebJS.normalizeSerialized(model);
+        return model;
     };
 
     window.WWebJS.getContactModel = (contact) => {
@@ -1731,7 +1642,12 @@ exports.LoadUtils = () => {
                                       .membershipRequestsActionRejectParticipantMixins
                                       ?.value.error;
                             return {
-                                requesterId: (() => { const _w = window.require('WAWebWidFactory').createWid(p.jid); return _w._serialized || _w.$1; })(),
+                                requesterId: (() => {
+                                    const _w = window
+                                        .require('WAWebWidFactory')
+                                        .createWid(p.jid);
+                                    return _w._serialized || _w.$1;
+                                })(),
                                 ...(error
                                     ? {
                                           error: +error,
@@ -1748,7 +1664,15 @@ exports.LoadUtils = () => {
                     }
                 } else {
                     result.push({
-                        requesterId: (() => { const _w = window.require('WAWebJidToWid').userJidToUserWid(participant.participantArgs[0].participantJid); return _w._serialized || _w.$1; })(),
+                        requesterId: (() => {
+                            const _w = window
+                                .require('WAWebJidToWid')
+                                .userJidToUserWid(
+                                    participant.participantArgs[0]
+                                        .participantJid,
+                                );
+                            return _w._serialized || _w.$1;
+                        })(),
                         message: 'ServerStatusCodeError',
                     });
                 }
