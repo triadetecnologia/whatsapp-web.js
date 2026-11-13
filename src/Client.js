@@ -524,6 +524,9 @@ class Client extends EventEmitter {
             await page.evaluateOnNewDocument(this.options.evalOnNewDoc);
         }
 
+        // Com a página ainda vazia, nenhum iframe fechando no meio derruba a criação das funções
+        await this.exposeEventListenerFunctions();
+
         await page.goto(WhatsWebURL, {
             waitUntil: 'load',
             timeout: 0,
@@ -639,7 +642,7 @@ class Client extends EventEmitter {
      * Private function
      * @property {boolean} reinject is this a reinject?
      */
-    async attachEventListeners() {
+    async exposeEventListenerFunctions() {
         await exposeFunctionIfAbsent(
             this.pupPage,
             'onAddMessageEvent',
@@ -1076,6 +1079,10 @@ class Client extends EventEmitter {
                 }
             },
         );
+    }
+
+    async attachEventListeners() {
+        await this.exposeEventListenerFunctions();
 
         await this.pupPage.evaluate(() => {
             const { Msg, Chat } = window.require('WAWebCollections');
